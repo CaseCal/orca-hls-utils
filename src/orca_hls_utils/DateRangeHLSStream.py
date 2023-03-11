@@ -136,6 +136,7 @@ class DateRangeHLSStream:
 
         # Increment timestamp
         self.current_time += audio_segment.duration
+        self.current_clip_duration += audio_segment.duration
 
         # Return filename
         base_path = audio_segment.base_uri
@@ -148,7 +149,6 @@ class DateRangeHLSStream:
         Creates the next wav file and returns filename. Will iterate through ts files
         until either the clip length is at polling duration or the end of the folder is hit.
         """
-
         # Fast forward to sstart time
         while self.current_time < self.start_unix_time:
             try:
@@ -159,6 +159,8 @@ class DateRangeHLSStream:
         # Init
         self.current_clip_duration = 0
         clip_start_time = self.current_time
+        self.logger.info(f"Creating clip starting at {datetime.fromtimestamp(self.current_time)}")
+        self.logger.debug(f"Current folder: {self.current_folder}")
 
         # if real_time execution mode is specified
         if self.real_time:
@@ -177,7 +179,7 @@ class DateRangeHLSStream:
         with TemporaryDirectory() as tmp_path:
             # Go until end of folder or end of clip duration
             file_names = []
-            while self.current_time <= self.end_unix_time and self.current_clip_duration <= self.polling_interval_in_seconds:
+            while round(self.current_clip_duration) <= self.polling_interval_in_seconds and self.current_time <= self.end_unix_time:
                 try:
                     audio_url = self.get_next_file()
                     file_name = audio_url.split("/")[-1]
@@ -198,6 +200,7 @@ class DateRangeHLSStream:
                     break
 
             # concatentate all .ts files
+            self.logger.info(f"Found {len(file_names)} files for duration of {self.current_clip_duration} secs")
             self.logger.debug(f"Files to concat = {file_names}")
             clipname, clip_start_time_formatted = datetime_utils.get_clip_name_from_unix_time(self.folder_name.replace("_", "-"), clip_start_time)
             hls_file = os.path.join(tmp_path, Path(clipname + ".ts"))
@@ -209,7 +212,7 @@ class DateRangeHLSStream:
             # read the concatenated .ts and write to wav
             audio_file = clipname + ".wav"
             wav_file_path = os.path.join(self.wav_dir, audio_file)
-            stream = ffmpeg.input(os.path.join(tmp_path, Path(hls_file)))
+            stream = ffmpeg.input(hls_file)
             stream = ffmpeg.output(stream, wav_file_path)
             try:
                 ffmpeg.run(
