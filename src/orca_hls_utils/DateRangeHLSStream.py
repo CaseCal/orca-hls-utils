@@ -1,4 +1,3 @@
-import math
 import os
 import shutil
 
@@ -99,23 +98,67 @@ class DateRangeHLSStream:
             )
         )
 
+        # Get folders
         self.valid_folders = s3_utils.get_folders_between_timestamp(
             all_hydrophone_folders, self.start_unix_time, self.end_unix_time
         )
         self.logger.info("Found {} folders in date range".format(len(self.valid_folders)))
+        self.logger.debug(f"Folders found: {self.valid_folders}")
+        self.valid_folder_iter = iter(self.valid_folders)
 
-        self.current_folder_index = 0
-        self.current_clip_start_time = self.start_unix_time
+        # Init variables
+        self.current_segment = None
+        self.get_next_folder()
+        self.current_clip_duration = 0
+        self.current_time = int(self.current_folder)
+
+    def get_next_folder(self) -> None:
+        """
+        Get the next folder in range. Sets the start timestamp and segments. Raises StopIteration if at last folder.
+        """
+
+        # Update timestamp
+        self.current_folder = next(self.valid_folder_iter)
+        self.current_time = int(self.current_folder)
+
+        # Load m3u8 file
+        stream_url = "{}/hls/{}/live.m3u8".format(
+            (self.stream_base), (self.current_folder)
+        )
+        stream_obj = m3u8.load(stream_url)
+        self.current_segments = iter(stream_obj.segments)
+
+    def get_next_file(self):
+        """
+        Get the next file name. Increments current timestamp. If at end of folder, raise StopIteration
+        """
+        audio_segment = next(self.current_segments)
+
+        # Increment timestamp
+        self.current_time += audio_segment.duration
+
+        # Return filename
+        base_path = audio_segment.base_uri
+        file_name = audio_segment.uri
+
+        return base_path + file_name
 
     def get_next_clip(self, current_clip_name=None):
-        # Get current folder
-        current_folder = int(self.valid_folders[self.current_folder_index])
-        (
-            clipname,
-            clip_start_time,
-        ) = datetime_utils.get_clip_name_from_unix_time(
-            self.folder_name.replace("_", "-"), self.current_clip_start_time
-        )
+        """
+        Creates the next wav file and returns filename. Will iterate through ts files
+        until either the clip length is at polling duration or the end of the folder is hit.
+        """
+
+        # Fast forward to sstart time
+        while self.current_time < self.start_unix_time:
+            try:
+                self.get_next_file()
+            except StopIteration:
+                self.get_next_folder()
+
+        # Init
+        self.current_clip_duration = 0
+        clip_start_time = self.current_time
 
         # if real_time execution mode is specified
         if self.real_time:
@@ -130,86 +173,32 @@ class DateRangeHLSStream:
             if time_to_sleep > 0:
                 time.sleep(time_to_sleep)
 
-        # read in current m3u8 file
-        # stream_url for the current AWS folder
-        stream_url = "{}/hls/{}/live.m3u8".format(
-            (self.stream_base), (current_folder)
-        )
-        stream_obj = m3u8.load(stream_url)
-        num_total_segments = len(stream_obj.segments)
-        if num_total_segments == 0:
-            self.current_folder_index += 1
-            self.current_clip_start_time = self.valid_folders[
-                self.current_folder_index
-            ]
-            return None, None, None
-        target_duration = (
-            sum([item.duration for item in stream_obj.segments])
-            / num_total_segments
-        )
-        num_segments_in_wav_duration = math.ceil(
-            self.polling_interval_in_seconds / target_duration
-        )
-
-        # calculate the start index by computing the current time - start of
-        # current folder
-        segment_start_index = math.ceil(
-            datetime_utils.get_difference_between_times_in_seconds(
-                self.current_clip_start_time, current_folder
-            )
-            / target_duration
-        )
-        segment_end_index = segment_start_index + num_segments_in_wav_duration
-
-        if segment_end_index > num_total_segments:
-            if self.current_folder_index + 1 >= len(self.valid_folders):
-                # Something went wrong, we'll just return the current data
-                self.logger.warn("Missing data, returning truncated file.")
-                self.logger.debug(f"Start index is {segment_start_index}")
-                self.logger.debug(f"Adjusting end index from {segment_end_index} to {num_total_segments}")
-                segment_end_index = num_total_segments
-                if segment_end_index < segment_start_index:
-                    self.logger.warn("No data found")
-                    self.current_clip_start_time = self.end_unix_time
-                    return None, None, None
-            else:
-                # move to the next folder and increment the
-                # current_clip_start_time to the new
-                self.current_folder_index += 1
-                self.current_clip_start_time = self.valid_folders[
-                    self.current_folder_index
-                ]
-                return None, None, None
-
-        # Can get the whole segment so update the clip_start_time for the next
-        # clip
-        # We do this before we actually do the pulling in case there is a
-        # problem with this clip
-        self.current_clip_start_time = (
-            datetime_utils.add_interval_to_unix_time(
-                self.current_clip_start_time, self.polling_interval_in_seconds
-            )
-        )
-
         # Create tmp path to hold .ts segments
         with TemporaryDirectory() as tmp_path:
-            os.makedirs(tmp_path, exist_ok=True)
-
+            # Go until end of folder or end of clip duration
             file_names = []
-            for i in range(segment_start_index, segment_end_index):
-                audio_segment = stream_obj.segments[i]
-                base_path = audio_segment.base_uri
-                file_name = audio_segment.uri
-                audio_url = base_path + file_name
+            while self.current_time <= self.end_unix_time and self.current_clip_duration <= self.polling_interval_in_seconds:
+                try:
+                    audio_url = self.get_next_file()
+                    file_name = audio_url.split("/")[-1]
+                except StopIteration:
+                    try:
+                        self.get_next_folder()
+                    except StopIteration:
+                        self.is_end_of_stream = True
+                    finally:
+                        break
                 try:
                     scraper.download_from_url(audio_url, tmp_path)
                     file_names.append(file_name)
                     self.logger.debug(f"Adding file {file_name}")
                 except Exception:
                     self.logger.warning("Skipping", audio_url, ": error.")
+                    break
 
             # concatentate all .ts files
             self.logger.info(f"Files to concat = {file_names}")
+            clipname, clip_start_time_formatted = datetime_utils.get_clip_name_from_unix_time(self.folder_name.replace("_", "-"), clip_start_time)
             hls_file = os.path.join(tmp_path, Path(clipname + ".ts"))
             with open(hls_file, "wb") as wfd:
                 for f in file_names:
@@ -225,9 +214,8 @@ class DateRangeHLSStream:
                 ffmpeg.run(
                     stream, overwrite_output=self.overwrite_output, quiet=self.quiet_ffmpeg
                 )
-            except Exception as e:
-                shutil.copyfile(hls_file, "ts/badfile.ts")
-                raise e
+            except Exception:
+                self.logger.exception(f"Failed to generate file {clipname}")
 
         # If we're in demo mode, we need to fake timestamps to make it seem
         # like the date range is real-time
@@ -245,9 +233,15 @@ class DateRangeHLSStream:
             # can be in PDT
             clip_start_time = current_clip_name.isoformat() + "Z"
 
+        # Update
+        if self.current_time >= self.end_unix_time:
+            self.is_end_of_stream = True
+
         # Get new index
-        return wav_file_path, clip_start_time, current_clip_name
+        return wav_file_path, clip_start_time_formatted, current_clip_name
 
     def is_stream_over(self):
-        # returns true or false based on whether the stream is over
-        return int(self.current_clip_start_time) >= int(self.end_unix_time)
+        """
+        Returns true if stream has be set to over or current time is past the desiignated end time.
+        """
+        return self.is_end_of_stream or (int(self.current_time) >= int(self.end_unix_time))
