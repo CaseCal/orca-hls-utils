@@ -1,5 +1,6 @@
 import glob
 import json
+import logging
 import os
 import urllib
 from os.path import dirname
@@ -80,7 +81,7 @@ def parse_database_page_to_tsv(url, tsvfile):
                 ),
             )
             f.write("\t".join([name, loc, date, audio, metadata]) + "\n")
-    print("Parsed links for", len(rows), "rows to file:", tsvfile)
+    logging.info("Parsed links for", len(rows), "rows to file:", tsvfile)
 
 
 def select_and_get_urls(
@@ -150,9 +151,9 @@ def download_from_url(dl_url, dl_dir):
     file_name = os.path.basename(dl_url)
     dl_path = os.path.join(dl_dir, file_name)
     if os.path.isfile(dl_path):
-        print("Skipping", file_name, "as it already exists.")
+        logging.info("Skipping", file_name, "as it already exists.")
     else:
-        print("Downloading", file_name)
+        logging.debug("Downloading", file_name)
         with TqdmUpTo(
             unit="B", unit_scale=True, miniters=1, desc=dl_url.split("/")[-1]
         ) as t:  # all optional kwargs

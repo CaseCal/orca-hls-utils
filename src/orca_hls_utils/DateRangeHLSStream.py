@@ -183,21 +183,22 @@ class DateRangeHLSStream:
                     file_name = audio_url.split("/")[-1]
                 except StopIteration:
                     try:
+                        self.logger.info(f"At end of folder {self.folder_name}, truncating clip to {self.current_clip_duration}s")
                         self.get_next_folder()
                     except StopIteration:
+                        self.logger.warning(f"Folder {self.folder_name} is last in range, stream is ended")
                         self.is_end_of_stream = True
                     finally:
                         break
                 try:
                     scraper.download_from_url(audio_url, tmp_path)
                     file_names.append(file_name)
-                    self.logger.debug(f"Adding file {file_name}")
                 except Exception:
                     self.logger.warning("Skipping", audio_url, ": error.")
                     break
 
             # concatentate all .ts files
-            self.logger.info(f"Files to concat = {file_names}")
+            self.logger.debug(f"Files to concat = {file_names}")
             clipname, clip_start_time_formatted = datetime_utils.get_clip_name_from_unix_time(self.folder_name.replace("_", "-"), clip_start_time)
             hls_file = os.path.join(tmp_path, Path(clipname + ".ts"))
             with open(hls_file, "wb") as wfd:
